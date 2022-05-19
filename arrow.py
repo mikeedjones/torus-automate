@@ -1,5 +1,4 @@
 import matplotlib.pyplot as plt
-# from pyrsistent import T
 import hexy as hx
 import numpy as np
 

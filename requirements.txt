@@ -1,0 +1,5 @@
+hexy
+numpy
+pytesseract
+cv2
+matplotlib
