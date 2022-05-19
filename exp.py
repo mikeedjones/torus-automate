@@ -9,6 +9,7 @@ __author__ = "Sunny Patel <github.com/laughdonor>"
 from __future__ import annotations
 from dataclasses import dataclass, astuple
 from itertools import groupby
+import traceback
 from PIL import Image
 from pprint import pprint
 from pytesseract import pytesseract, image_to_string, image_to_data, Output
@@ -16,7 +17,18 @@ from sys import exit
 from time import sleep
 from typing import List
 import numpy as np
-import cv2, os, torus  # Torus solver from https://codegolf.stackexchange.com/a/172852/58557
+import cv2, os, torus, arrow  # Torus solver from https://codegolf.stackexchange.com/a/172852/58557
+
+error_taps = np.array([[ 127., 1145.],
+       [ 127., 1145.],
+       [ 127., 1145.],
+       [ 127., 1145.],
+       [ 127., 1627.],
+       [ 127., 1627.],
+       [ 266., 1064.],
+       [ 266., 1064.],
+       [ 266., 1064.],
+       [ 266., 1386.]])
 
 # Requires Python 3.7+
 @dataclass
@@ -39,10 +51,10 @@ class Rect:
 
 
 # Phone specific coordinates of grid area. Change debug variable and get coordinates from temp_file (use paint)
-grid = Rect(x0=57, y0=896, x1=1041, y1=1880)
+grid = Rect(x0=57, y0=896, x1=1041, y1=1940)
+hex_grid = {'offset':[[545,1386]], 'scale':1182}
 debug = False
-tess_config = '--dpi 420 --psm 6'   # Use `adb shell wm density` to get the dpi
-pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+tess_config = '--dpi 440 --psm 6'   # Use `adb shell wm density` to get the dpi
 
 
 # In[3]:
@@ -54,22 +66,53 @@ def batch(iterable, n=1):
         yield iterable[ndx:min(ndx + n, l)]
 
 def capture(temp_file: str ="scr.png") -> Image:
-    os.system(r"adb exec-out screencap -p | perl -pe 's/\x0D\x0A/\x0A/g' > " + temp_file)
+    os.system("adb shell screencap -p > " + temp_file)
     grey = cv2.bitwise_not(cv2.cvtColor(cv2.imread(temp_file), cv2.COLOR_BGR2GRAY))
     if not debug:
         os.remove(temp_file)
     return Image.fromarray(cv2.threshold(grey, 152, 255, cv2.THRESH_BINARY)[1])
 
-def solve(image: Image) -> (List[(int, str, int)], int):
-    t = image_to_string(image.crop(astuple(grid)), config=f"{tess_config} --tessdata-dir ./tess -l digits").strip()
-    rows = t.count("\n") + 1
-    M = np.fromstring(t, sep=" ", dtype=int).reshape(-1, rows)
+def split_im(image: Image):
+    im = np.array(image.crop(astuple(grid)))
 
-    if len(np.unique(M)) != rows ** 2:
-        print(f"\n\n\nERROR: Didn't recognize every number: {len(np.unique(M))}\n\n\n")
-        pprint(M)
-        exit()
-    return [(int(r), d, len(list(g))) for (d, r), g in groupby(torus.f(M.tolist()))], rows
+    imgheight=im.shape[0]
+    imgwidth=im.shape[1]
+
+    y1 = 0
+    M = imgheight
+    N = imgwidth//7
+    tiles = []
+    for y in range(0,imgheight,M):
+        for x in range(0, imgwidth, N):
+            y1 = y + M
+            x1 = x + N
+            tiles.append(Image.fromarray(im[y:y+M,x:x+N]))
+
+            # cv2.rectangle(im, (x, y), (x1, y1), (0, 255, 0))
+            # cv2.imwrite(str(x) + '_' + str(y)+".png",tiles)
+    return tiles
+    
+
+def solve(image: Image):
+    cols = []
+    for im in split_im(image):
+        cols.append(image_to_string(im, config=f"{tess_config} -c tessedit_char_whitelist=0123456789").replace('\n\n','\n'))
+    arr = [row.split('\n')[:-1] for row in cols[:7]]
+    arr = [[int(i) for i in j] for j in arr]
+
+    print('grid read')
+
+    rectangle = arrow.make_grid(arr)
+    taps = arrow.solve(rectangle)
+
+    taps = taps/(3) * hex_grid['scale']/2
+
+    taps = taps + hex_grid['offset']
+    taps = np.around(taps)
+
+    print('input sequence assembled')
+
+    return taps
 
 def swipes(steps: List[(int, str, int)], rows: int) -> List[str]:
     print(f"Solving with {len(steps)} swipes")
@@ -89,17 +132,19 @@ def swipes(steps: List[(int, str, int)], rows: int) -> List[str]:
         output.append(f"input touchscreen swipe {coord.x0} {coord.y0} {coord.x1} {coord.y1} 150")
     return output
 
+def tap_puzzle(data) -> List[str]:
+    return [f"input touchscreen tap {d[0]} {d[1]}" for d in data]
+
 def tap(data: dict, idx: int) -> List[str]:
     return [f"input touchscreen tap {data['left'][idx]} {data['top'][idx]}"]
 
 def send_commands(commands: List[str]):
     for batchset in batch(commands, 16):  # 16 is used because of 1024 character limit of adb commands
-        command = " && sleep 0.1 && ".join(batchset)
+        command = " && ".join(batchset)
         if debug:
             print(f"adb shell \"{command}\"")
         os.system(f"adb shell \"{command}\"")
         sleep(0.1)
-    sleep(1)
 
 
 # In[4]:
@@ -111,7 +156,13 @@ while True:
     data = image_to_data(image, config=tess_config, output_type=Output.DICT)
 
     if "Give Up" in text:
-        send_commands(swipes(*solve(image)))
+        try:
+            taps = solve(image)
+            send_commands(tap_puzzle(taps))
+        except:
+            traceback.print_exc()
+            send_commands(tap_puzzle(error_taps))
+            continue
     elif "Claim" in data['text']:
         pprint("Complete!")
         idx = data['text'].index("Claim")
@@ -128,3 +179,5 @@ while True:
         pprint(data['text'])
         break
 
+
+# %%
